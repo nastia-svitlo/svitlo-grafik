@@ -61,8 +61,13 @@ def fetch(url):
         return r.read().decode("utf-8", "replace")
 
 
+INLINE_RE = re.compile(r"(?i)</?(?:span|strong|b|i|em|u|a|font|small|sup|sub|mark)\b[^<>]*>")
+
+
 def to_text(page):
     page = re.sub(r"(?is)<(script|style|noscript)\b.*?</\1>", " ", page)
+    # на сайті час буває розрізаний оформленням навпіл: «23</span><span>:00» — склеюємо назад
+    page = INLINE_RE.sub("", page)
     page = re.sub(r"(?i)<br\s*/?>|</(p|div|li|h\d|tr|td)>", "\n", page)
     page = re.sub(r"<[^>]+>", " ", page)
     page = html.unescape(page).replace("\xa0", " ")
@@ -76,6 +81,7 @@ def deep_text(page):
     page = page.replace("\\n", "\n").replace("\\r", " ").replace("\\t", " ")
     page = page.replace("\\/", "/").replace('\\"', '"')
     page = html.unescape(page)
+    page = INLINE_RE.sub("", page)
     page = re.sub(r"(?i)<br\s*/?>|</(p|div|li|h\d|tr|td)>", "\n", page)
     page = re.sub(r"</?[a-zA-Z][^<>]{0,300}>", " ", page)
     page = page.replace("\xa0", " ")
