@@ -38,7 +38,7 @@ STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 
 SITE = "https://www.cherkasyoblenergo.com"
 NEWS_URL = SITE + "/media?lang=uk"
-MAX_ARTICLES = 8
+MAX_ARTICLES = 12
 
 MONTHS = ["січня", "лютого", "березня", "квітня", "травня", "червня",
           "липня", "серпня", "вересня", "жовтня", "листопада", "грудня"]
@@ -111,29 +111,35 @@ def parse_ranges(s):
 
 # мітка черги («2.1»), після якої невдовзі йде час; терпимо до будь-яких тире/пробілів/двокрапок
 LABEL_RE = re.compile(r"(?<![\d.:,])([1-6]\.[12])(?!\d)(?=[^\d]{0,15}\d{1,2}:\d{2})")
-TIME_RE = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)")
+_T = r"(?<!\d)\d{1,2}:\d{2}(?!\d)"
+# ланцюжок «час–час, час–час…» одразу після мітки; обривається, щойно між часами щось стороннє
+CHAIN_RE = re.compile(r"\D{0,15}?(%s\D{1,8}?%s(?:\D{1,8}?%s\D{1,8}?%s)*)" % (_T, _T, _T, _T))
+TIME_RE = re.compile(_T)
 
 
 def queue_ranges(text, queue):
-    """Інтервали для черги: всі часи між її міткою і міткою наступної черги, попарно."""
-    labels = list(LABEL_RE.finditer(text))
-    for i, m in enumerate(labels):
+    """Інтервали для черги. Розклад на сторінці може траплятись кілька разів
+    (напр. обрізаний анонс і повний текст) — беремо найповніший варіант."""
+    labels = [m for m in LABEL_RE.finditer(text)]
+    best = None
+    for m in labels:
         if m.group(1) != queue:
             continue
-        end = labels[i + 1].start() if i + 1 < len(labels) else m.end() + 200
-        seg = text[m.end():min(end, m.end() + 200)]
-        print("  рядок черги %s: %r" % (queue, seg.strip()[:160]))
-        times = ["%s:%s" % t for t in TIME_RE.findall(seg)]
+        c = CHAIN_RE.match(text, m.end())
+        times = TIME_RE.findall(c.group(1)) if c else []
         pairs = ["%s-%s" % (times[j], times[j + 1]) for j in range(0, len(times) - 1, 2)]
-        return parse_ranges(", ".join(pairs))
-    print("  УВАГА: черги %s у цьому графіку не знайдено (знайдено черг: %d), пропускаю"
-          % (queue, len(labels)))
-    print("  початок розкладу: %r" % text[labels[0].start():labels[0].start() + 300] if labels else "")
-    return None
+        r = parse_ranges(", ".join(pairs))
+        print("  черга %s, варіант: %r -> %s" % (queue, text[m.end():m.end() + 90].strip(), fmt_ranges(r)))
+        if best is None or len(r) >= len(best):
+            best = r
+    if best is None:
+        print("  УВАГА: черги %s у цьому графіку не знайдено (знайдено черг: %d), пропускаю"
+              % (queue, len(labels)))
+    return best
 
 
 def parse_article(text, queue):
-    """Повертає (день, місяць, інтервали, 'дд.мм гг:хв' публікації) або None."""
+    """Повертає (день, місяць, інтервали, (дд.мм.рррр, хвилина публікації)) або None."""
     t = TITLE_RE.search(text)
     if not t:
         return None
@@ -148,13 +154,36 @@ def parse_article(text, queue):
     if ranges is None:  # краще промовчати, ніж показати неправильний графік
         return None
     s = STAMP_RE.search(text)
-    stamp = (s.group(1)[:5] + " " + s.group(2)) if s else ""
+    stamp = None
+    if s:
+        hh, mm = s.group(2).split(":")
+        stamp = (s.group(1), int(hh) * 60 + int(mm))
     return day, month, ranges, stamp
 
 
+def clip(ranges, lo, hi):
+    return [(max(a, lo), min(b, hi)) for a, b in ranges if min(b, hi) > max(a, lo)]
+
+
+def merge_versions(date, versions):
+    """versions — від найновішої до найстарішої. Оновлення вдень часто містить лише
+    години, що лишились, тож те, що вже минуло, беремо з попередньої версії."""
+    result, last_stamp = [], ""
+    for ranges, stamp in reversed(versions):
+        cut = 0
+        if stamp and stamp[0] == date.strftime("%d.%m.%Y"):
+            cut = stamp[1]
+        joined = clip(result, 0, cut) + list(ranges)
+        result = parse_ranges(", ".join("%s-%s" % (fmt_time(a), fmt_time(b) if b < 1440 else "24:00")
+                                        for a, b in joined))
+        if stamp:
+            last_stamp = "%s %s" % (stamp[0][:5], fmt_time(stamp[1]))
+    return result, last_stamp
+
+
 def load_schedules(queue, dates):
-    """{дата: (інтервали, штамп)} для потрібних дат; береться найновіша новина."""
-    found = {}
+    """{дата: (інтервали, штамп)} для потрібних дат."""
+    versions = {d: [] for d in dates}
     for url in article_links(fetch(NEWS_URL)):
         try:
             parsed = parse_article(to_text(fetch(url)), queue)
@@ -165,11 +194,14 @@ def load_schedules(queue, dates):
             continue
         day, month, ranges, stamp = parsed
         for d in dates:
-            if (d.day, d.month) == (day, month) and d not in found:
-                found[d] = (ranges, stamp)
-                print("  знайдено графік на", d, "->", fmt_ranges(ranges) or "без відключень")
-        if len(found) == len(dates):
-            break
+            if (d.day, d.month) == (day, month):
+                versions[d].append((ranges, stamp))
+    found = {}
+    for d, v in versions.items():
+        if v:
+            found[d] = merge_versions(d, v)
+            print("  графік на", d, "->", fmt_ranges(found[d][0]) or "без відключень",
+                  "(версій: %d)" % len(v))
     return found
 
 
