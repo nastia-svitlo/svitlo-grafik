@@ -39,6 +39,7 @@ STATE_FILE = os.environ.get("STATE_FILE", "state.json")
 SITE = "https://www.cherkasyoblenergo.com"
 NEWS_URL = SITE + "/media?lang=uk"
 MAX_ARTICLES = 12
+DEBUG = {}
 
 MONTHS = ["січня", "лютого", "березня", "квітня", "травня", "червня",
           "липня", "серпня", "вересня", "жовтня", "листопада", "грудня"]
@@ -65,6 +66,19 @@ def to_text(page):
     page = re.sub(r"(?i)<br\s*/?>|</(p|div|li|h\d|tr|td)>", "\n", page)
     page = re.sub(r"<[^>]+>", " ", page)
     page = html.unescape(page).replace("\xa0", " ")
+    return re.sub(r"[ \t]+", " ", page)
+
+
+def deep_text(page):
+    """Як to_text, але нічого не викидає: розкриває дані зі скриптів та атрибутів."""
+    page = html.unescape(html.unescape(page))
+    page = re.sub(r"\\u([0-9a-fA-F]{4})", lambda m: chr(int(m.group(1), 16)), page)
+    page = page.replace("\\n", "\n").replace("\\r", " ").replace("\\t", " ")
+    page = page.replace("\\/", "/").replace('\\"', '"')
+    page = html.unescape(page)
+    page = re.sub(r"(?i)<br\s*/?>|</(p|div|li|h\d|tr|td)>", "\n", page)
+    page = re.sub(r"</?[a-zA-Z][^<>]{0,300}>", " ", page)
+    page = page.replace("\xa0", " ")
     return re.sub(r"[ \t]+", " ", page)
 
 
@@ -138,9 +152,10 @@ def queue_ranges(text, queue):
     return best
 
 
-def parse_article(text, queue):
+def parse_article(page, queue):
     """Повертає (день, місяць, інтервали, (дд.мм.рррр, хвилина публікації)) або None."""
-    t = TITLE_RE.search(text)
+    text, deep = to_text(page), deep_text(page)
+    t = TITLE_RE.search(text) or TITLE_RE.search(deep)
     if not t:
         return None
     day, mname = int(t.group(1)), t.group(2).lower()
@@ -148,12 +163,12 @@ def parse_article(text, queue):
         return None
     month = MONTHS.index(mname) + 1
     # на сторінці має бути сам розклад (рядки кількох черг), інакше це не той текст
-    if len(LABEL_RE.findall(text)) < 3:
+    if len(LABEL_RE.findall(deep)) < 3:
         return None
-    ranges = queue_ranges(text, queue)
+    ranges = queue_ranges(deep, queue)
     if ranges is None:  # краще промовчати, ніж показати неправильний графік
         return None
-    s = STAMP_RE.search(text)
+    s = STAMP_RE.search(text) or STAMP_RE.search(deep)
     stamp = None
     if s:
         hh, mm = s.group(2).split(":")
@@ -186,7 +201,8 @@ def load_schedules(queue, dates):
     versions = {d: [] for d in dates}
     for url in article_links(fetch(NEWS_URL)):
         try:
-            parsed = parse_article(to_text(fetch(url)), queue)
+            page = fetch(url)
+            parsed = parse_article(page, queue)
         except Exception as e:  # одна зламана новина не має зупиняти все
             print("  пропускаю", url, "-", e)
             continue
@@ -196,6 +212,8 @@ def load_schedules(queue, dates):
         for d in dates:
             if (d.day, d.month) == (day, month):
                 versions[d].append((ranges, stamp))
+                if "url" not in DEBUG:  # найновіша новина — на випадок, якщо треба розібратись
+                    DEBUG.update(url=url, html=page[:400000])
     found = {}
     for d, v in versions.items():
         if v:
@@ -396,7 +414,9 @@ def main():
         state[key] = {"hash": digest, "message_id": res["result"]["message_id"]}
 
     keep = {(today + timedelta(days=i)).isoformat() for i in (-1, 0, 1)}
+    debug = state.get("_debug", {})
     state = {k: v for k, v in state.items() if k in keep}
+    state["_debug"] = DEBUG if DEBUG and DEBUG.get("url") != debug.get("url") else debug
     json.dump(state, open(STATE_FILE, "w", encoding="utf-8"), ensure_ascii=False, indent=1, sort_keys=True)
 
 
