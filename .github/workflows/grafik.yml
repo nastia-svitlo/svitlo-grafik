@@ -1,0 +1,40 @@
+name: Графік відключень
+
+on:
+  schedule:
+    - cron: "7,22,37,52 * * * *"   # кожні 15 хвилин
+  workflow_dispatch:                # кнопка «Run workflow» для запуску вручну
+
+permissions:
+  contents: write
+
+concurrency:
+  group: grafik
+  cancel-in-progress: false
+
+jobs:
+  post:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    env:
+      TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
+      CHANNEL: "@svitlobot_Chaloho106"
+      QUEUE: "2.1"
+      PLACE: "Чалого, 106"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Шрифти та бібліотека для малювання
+        run: |
+          sudo apt-get install -y -qq fonts-dejavu-core > /dev/null
+          pip install -q pillow
+      - name: Перевірити графік і опублікувати
+        run: python bot.py
+      - name: Запам'ятати, що вже опубліковано
+        run: |
+          git config user.name "grafik-bot"
+          git config user.email "grafik-bot@users.noreply.github.com"
+          git add state.json
+          git diff --cached --quiet || (git commit -q -m "Оновлено стан" && git push -q)
