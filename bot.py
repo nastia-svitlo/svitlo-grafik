@@ -109,6 +109,29 @@ def parse_ranges(s):
     return merged
 
 
+# мітка черги («2.1»), після якої невдовзі йде час; терпимо до будь-яких тире/пробілів/двокрапок
+LABEL_RE = re.compile(r"(?<![\d.:,])([1-6]\.[12])(?!\d)(?=[^\d]{0,15}\d{1,2}:\d{2})")
+TIME_RE = re.compile(r"(?<!\d)(\d{1,2}):(\d{2})(?!\d)")
+
+
+def queue_ranges(text, queue):
+    """Інтервали для черги: всі часи між її міткою і міткою наступної черги, попарно."""
+    labels = list(LABEL_RE.finditer(text))
+    for i, m in enumerate(labels):
+        if m.group(1) != queue:
+            continue
+        end = labels[i + 1].start() if i + 1 < len(labels) else m.end() + 200
+        seg = text[m.end():min(end, m.end() + 200)]
+        print("  рядок черги %s: %r" % (queue, seg.strip()[:160]))
+        times = ["%s:%s" % t for t in TIME_RE.findall(seg)]
+        pairs = ["%s-%s" % (times[j], times[j + 1]) for j in range(0, len(times) - 1, 2)]
+        return parse_ranges(", ".join(pairs))
+    print("  УВАГА: черги %s у цьому графіку не знайдено (знайдено черг: %d), пропускаю"
+          % (queue, len(labels)))
+    print("  початок розкладу: %r" % text[labels[0].start():labels[0].start() + 300] if labels else "")
+    return None
+
+
 def parse_article(text, queue):
     """Повертає (день, місяць, інтервали, 'дд.мм гг:хв' публікації) або None."""
     t = TITLE_RE.search(text)
@@ -118,12 +141,12 @@ def parse_article(text, queue):
     if mname not in MONTHS:
         return None
     month = MONTHS.index(mname) + 1
-    # на сторінці має бути сам розклад (рядки черг), інакше це не той текст
-    if not re.search(r"(?<![\d.])[1-6]\.[12]\s+\d{1,2}:\d{2}", text):
+    # на сторінці має бути сам розклад (рядки кількох черг), інакше це не той текст
+    if len(LABEL_RE.findall(text)) < 3:
         return None
-    q = re.search(r"(?<![\d.])" + re.escape(queue) +
-                  r"\s+((?:\d{1,2}:\d{2}\s*[-–—]\s*\d{1,2}:\d{2}\s*[,;]?\s*)+)", text)
-    ranges = parse_ranges(q.group(1)) if q else []
+    ranges = queue_ranges(text, queue)
+    if ranges is None:  # краще промовчати, ніж показати неправильний графік
+        return None
     s = STAMP_RE.search(text)
     stamp = (s.group(1)[:5] + " " + s.group(2)) if s else ""
     return day, month, ranges, stamp
